@@ -1,0 +1,876 @@
+// =============================================================================
+// PRISMA SCHEMA FOR POSTGRESQL: PERFORMANCE MANAGEMENT & PLANNING MODULE
+// Multi-Tenant, Dynamic Org Charts (OC-1 to OC-6), Multi-Source Planning,
+// Month-by-Month Workplans, Dynamic Performance Contracts & Financial Gatekeeper
+// =============================================================================
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// =============================================================================
+// 1. CORE ENUMS
+// =============================================================================
+
+enum OrgType {
+  PUBLIC_SECTOR          // Stage 1: Public institutions, Civil service ministries & agencies
+  NONPROFIT_NGO          // Stage 2: Grant-funded NGOs, Foundations, Multilaterals
+  ENTERPRISE_FOR_PROFIT  // Stage 3: Commercial enterprises, Holding groups
+}
+
+enum SystemRole {
+  ADMINISTRATOR          // Sets up org chart, roles, and approval charters
+  PLANNER_ME_LEAD        // Manages reporting year, strategic plan sources, Annual Plan
+  DEPARTMENT_HEAD        // Oversees consolidated departmental workplans
+  UNIT_HEAD              // Establishes detailed monthly workplans, sets evidence requirements
+  SUPERVISOR             // Agrees/reviews contracts, tracks delivery, clears memos
+  EMPLOYEE               // Confirms contracts, executes activities, submits evidence
+  APPROVER               // Formally reviews and approves charter checkpoints
+  AUDITOR_VIEWER         // Read-only compliance and M&E oversight
+}
+
+enum PlanSourceType {
+  STRATEGIC_PLAN         // 5-year or 10-year institutional strategic plan
+  GOVERNMENT_MANDATE     // Executive order, ministerial performance guideline, national directive
+  FUNDER_AGREEMENT       // Donor/grant agreement with earmarked deliverables
+  BOARD_DIRECTIVE        // Board resolutions, governing council priority
+}
+
+enum PlanStatus {
+  DRAFT
+  UNDER_REVIEW
+  APPROVED
+  ACTIVE
+  ARCHIVED
+}
+
+enum ContributionType {
+  DELIVERING             // Directly delivers strategic annual target (core strategic execution)
+  SUPPORTING             // Enables or supports delivery (enabler, operational backbone)
+}
+
+enum ExecutionStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  COMPLETED
+  OVERDUE
+  ON_HOLD
+  CANCELLED
+}
+
+enum ContractItemCategory {
+  STRATEGIC_ACTIVITY     // Dynamically linked to operational workplan activities
+  JOB_DESCRIPTION_DUTY   // Non-strategic ongoing routine duties & core functional responsibilities
+}
+
+enum ContractStatus {
+  DRAFT
+  PENDING_EMPLOYEE_REVIEW
+  PENDING_SUPERVISOR_SIGN
+  APPROVED
+  ACTIVE
+  EVALUATED
+  DISPUTED
+}
+
+enum WorkflowTargetType {
+  ANNUAL_PLAN
+  WORKPLAN
+  PERFORMANCE_CONTRACT
+  FINANCIAL_MEMO
+}
+
+enum ApprovalDecision {
+  APPROVE
+  RETURN_FOR_REVISION
+  REJECT
+}
+
+enum WorkflowStatus {
+  PENDING
+  IN_PROGRESS
+  APPROVED
+  RETURNED
+  REJECTED
+}
+
+enum VerificationStatus {
+  PENDING
+  VERIFIED
+  REJECTED
+}
+
+enum FinancialMemoStatus {
+  DRAFT
+  PENDING_CLEARANCE
+  CLEARED
+  REJECTED
+  CANCELLED
+}
+
+enum AccountingSystem {
+  IFMIS                  // Integrated Financial Management Information System
+  QUICKBOOKS
+  SAP
+  ORACLE_FINANCIALS
+  CUSTOM_API
+}
+
+enum ReportingLineType {
+  DIRECT                 // Primary administrative supervisor
+  FUNCTIONAL             // Programmatic / project lead
+  MATRIX                 // Secondary or cross-functional mentor
+}
+
+// =============================================================================
+// 2. MULTI-TENANCY & IDENTITY
+// =============================================================================
+
+model Organization {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  code                  String                 @unique @db.VarChar(50) // e.g. "MIN-HEALTH", "OXFAM-KENYA"
+  name                  String                 @db.VarChar(255)
+  slug                  String                 @unique @db.VarChar(100)
+  orgType               OrgType                @default(PUBLIC_SECTOR)
+  fiscalYearStartMonth  Int                    @default(1) // 1 = January, 7 = July (Kenya/UK Gov fiscal calendar)
+  currency              String                 @default("USD") @db.VarChar(10)
+  logoUrl               String?                @db.Text
+  isActive              Boolean                @default(true)
+  settings              Json?                  @db.JsonB
+  createdAt             DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime               @updatedAt @db.Timestamptz(6)
+
+  // Relationships
+  users                 User[]
+  employeeProfiles      EmployeeProfile[]
+  hierarchyLevels       OrgHierarchyLevel[]
+  orgUnits              OrgUnit[]
+  planSources           PlanSource[]
+  annualPlans           AnnualPlan[]
+  approvalCharters      ApprovalCharter[]
+  jobDescriptionDuties  JobDescriptionDuty[]
+  storyBankItems        StoryBankItem[]
+  auditLogs             AuditTrailLog[]
+
+  @@index([orgType, isActive])
+  @@map("organizations")
+}
+
+model User {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  organizationId        String                 @db.Uuid
+  email                 String                 @unique @db.VarChar(255)
+  passwordHash          String?                @db.VarChar(255)
+  fullName              String                 @db.VarChar(255)
+  role                  SystemRole             @default(EMPLOYEE)
+  isActive              Boolean                @default(true)
+  avatarUrl             String?                @db.Text
+  createdAt             DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime               @updatedAt @db.Timestamptz(6)
+
+  // Relations
+  organization          Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  employeeProfile       EmployeeProfile?
+  auditDecisions        ApprovalDecisionLog[]
+  evidenceSubmissions   EvidenceSubmission[]   @relation("SubmittedEvidence")
+  verifiedEvidence      EvidenceSubmission[]   @relation("VerifiedEvidence")
+  financialMemos        FinancialMemo[]        @relation("RequestedMemos")
+  clearedMemos          FinancialMemo[]        @relation("ClearedMemos")
+  leadUnits             OrgUnit[]              @relation("UnitLead")
+  auditLogs             AuditTrailLog[]
+
+  @@index([organizationId, role])
+  @@map("users")
+}
+
+model EmployeeProfile {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  organizationId        String                 @db.Uuid
+  userId                String                 @unique @db.Uuid
+  staffNumber           String                 @db.VarChar(100)
+  designation           String                 @db.VarChar(255)
+  gradeLevel            String?                @db.VarChar(50)
+  phone                 String?                @db.VarChar(50)
+  
+  // OC-5: Assign each individual to a single home unit with designated reporting lines
+  homeUnitId            String                 @db.Uuid
+  supervisorId          String?                @db.Uuid
+
+  createdAt             DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime               @updatedAt @db.Timestamptz(6)
+
+  // Relations
+  organization          Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user                  User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  homeUnit              OrgUnit                @relation("HomeUnitEmployees", fields: [homeUnitId], references: [id], onDelete: Restrict)
+  supervisor            EmployeeProfile?       @relation("SupervisorSupervisees", fields: [supervisorId], references: [id], onDelete: SetNull)
+  supervisees           EmployeeProfile[]      @relation("SupervisorSupervisees")
+
+  // Matrix and secondary reporting lines
+  supervisingReportingLines ReportingLine[]    @relation("ReportingSupervisor")
+  subordinateReportingLines ReportingLine[]    @relation("ReportingSubordinate")
+
+  // Assigned Workplan Activities & Contracts
+  assignedActivities    WorkplanActivity[]     @relation("ActivityLeadAssignee")
+  performanceContracts  PerformanceContract[]  @relation("EmployeeContracts")
+  supervisedContracts   PerformanceContract[]  @relation("SupervisorContracts")
+
+  @@unique([organizationId, staffNumber])
+  @@index([organizationId, homeUnitId])
+  @@index([supervisorId])
+  @@map("employee_profiles")
+}
+
+model ReportingLine {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  subordinateId         String                 @db.Uuid
+  supervisorId          String                 @db.Uuid
+  reportingType         ReportingLineType      @default(DIRECT)
+  description           String?                @db.VarChar(255)
+  createdAt             DateTime               @default(now()) @db.Timestamptz(6)
+
+  subordinate           EmployeeProfile        @relation("ReportingSubordinate", fields: [subordinateId], references: [id], onDelete: Cascade)
+  supervisor            EmployeeProfile        @relation("ReportingSupervisor", fields: [supervisorId], references: [id], onDelete: Cascade)
+
+  @@unique([subordinateId, supervisorId, reportingType])
+  @@index([subordinateId])
+  @@index([supervisorId])
+  @@map("reporting_lines")
+}
+
+// =============================================================================
+// 3. DYNAMIC ORGANIZATIONAL CHART ENGINE (OC-1 TO OC-6)
+// =============================================================================
+
+// OC-1: Allow flexible vertical level definition (e.g. Board -> CEO -> Directorate -> Dept -> Division -> Unit)
+model OrgHierarchyLevel {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  organizationId        String                 @db.Uuid
+  rank                  Int                    // 1 = Highest (Board), 2 = CEO, 3 = Directorate, etc.
+  code                  String                 @db.VarChar(50)  // "LVL-1", "DIR", "DEPT"
+  name                  String                 @db.VarChar(100) // "Board", "Chief Executive", "Directorate"
+  description           String?                @db.Text
+  isLeafLevel           Boolean                @default(false)
+  createdAt             DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime               @updatedAt @db.Timestamptz(6)
+
+  organization          Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  orgUnits              OrgUnit[]
+
+  @@unique([organizationId, rank])
+  @@unique([organizationId, code])
+  @@index([organizationId, rank])
+  @@map("org_hierarchy_levels")
+}
+
+// OC-2: Support unlimited horizontal unit placement
+// OC-3: Support branch level skipping (flexible parent-child links regardless of skip)
+// OC-4: Preserve attached workplans during chart reorganization (UUID foreign keys immutable)
+// OC-6: Interactive org chart diagrams metadata (layout coordinates, collapsed state, lead)
+model OrgUnit {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  organizationId        String                 @db.Uuid
+  levelId               String                 @db.Uuid
+  parentId              String?                @db.Uuid // OC-3: Nullable for roots or level-skipped branches
+  code                  String                 @db.VarChar(50)  // "FIN-01", "ICT-DIV"
+  name                  String                 @db.VarChar(255)
+  description           String?                @db.Text
+  
+  // Materialized path for fast recursive subtree queries (e.g. "/root-uuid/dir-uuid/dept-uuid")
+  path                  String                 @default("/") @db.VarChar(1000)
+  depth                 Int                    @default(1)
+  sortOrder             Int                    @default(0) // Horizontal arrangement ordering
+  
+  // Operational Lead
+  leadUserId            String?                @db.Uuid
+
+  // Visual diagram layout cache for OC-6
+  visualMetadata        Json?                  @db.JsonB
+
+  isActive              Boolean                @default(true)
+  createdAt             DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime               @updatedAt @db.Timestamptz(6)
+
+  // Relations
+  organization          Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  level                 OrgHierarchyLevel      @relation(fields: [levelId], references: [id], onDelete: Restrict)
+  parent                OrgUnit?               @relation("OrgUnitHierarchy", fields: [parentId], references: [id], onDelete: SetNull)
+  children              OrgUnit[]              @relation("OrgUnitHierarchy")
+  leadUser              User?                  @relation("UnitLead", fields: [leadUserId], references: [id], onDelete: SetNull)
+
+  // OC-5: Employees designated to this home unit
+  homeEmployees         EmployeeProfile[]      @relation("HomeUnitEmployees")
+
+  // OC-4: Preserved Workplans during chart reorganization
+  workplans             Workplan[]
+  annualPlanCascades    AnnualPlanItemCascade[]
+  restructureHistory    OrgUnitRestructureHistory[]
+
+  @@unique([organizationId, code])
+  @@index([organizationId, parentId])
+  @@index([organizationId, levelId])
+  @@index([path])
+  @@map("org_units")
+}
+
+// OC-4: Audit log preserving historical lineage during dynamic restructuring
+model OrgUnitRestructureHistory {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  orgUnitId             String                 @db.Uuid
+  previousParentId      String?                @db.Uuid
+  newParentId           String?                @db.Uuid
+  previousLevelId       String?                @db.Uuid
+  newLevelId            String?                @db.Uuid
+  previousPath          String                 @db.VarChar(1000)
+  newPath               String                 @db.VarChar(1000)
+  restructureReason     String                 @db.Text
+  changedByUserId       String                 @db.Uuid
+  createdAt             DateTime               @default(now()) @db.Timestamptz(6)
+
+  orgUnit               OrgUnit                @relation(fields: [orgUnitId], references: [id], onDelete: Cascade)
+
+  @@index([orgUnitId])
+  @@index([createdAt])
+  @@map("org_unit_restructure_history")
+}
+
+// =============================================================================
+// 4. PLAN SOURCES & STRATEGIC OBJECTIVES (PS-1, PS-2)
+// =============================================================================
+
+// PS-1: Record multiple plan source types (Strategic Plan, Government Mandate, Funder Agreements, Board Directives)
+model PlanSource {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  organizationId        String                 @db.Uuid
+  sourceType            PlanSourceType         @default(STRATEGIC_PLAN)
+  referenceCode         String                 @db.VarChar(100)
+  title                 String                 @db.VarChar(255)
+  funderOrIssuer        String?                @db.VarChar(255)
+  startYear             Int
+  endYear               Int
+  documentUrl           String?                @db.Text
+  description           String?                @db.Text
+  isActive              Boolean                @default(true)
+  createdAt             DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime               @updatedAt @db.Timestamptz(6)
+
+  organization          Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  strategicObjectives   StrategicObjective[]
+
+  @@unique([organizationId, referenceCode])
+  @@index([organizationId, sourceType])
+  @@map("plan_sources")
+}
+
+// PS-2: Define strategic objectives, indicators, baselines, and targets under each source
+model StrategicObjective {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  planSourceId          String                 @db.Uuid
+  parentObjectiveId     String?                @db.Uuid
+  code                  String                 @db.VarChar(50)
+  statement             String                 @db.Text
+  weightage             Decimal?               @db.Decimal(5, 2)
+  sortOrder             Int                    @default(0)
+  createdAt             DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime               @updatedAt @db.Timestamptz(6)
+
+  planSource            PlanSource             @relation(fields: [planSourceId], references: [id], onDelete: Cascade)
+  parent                StrategicObjective?    @relation("ObjectiveSubHierarchy", fields: [parentObjectiveId], references: [id], onDelete: SetNull)
+  children              StrategicObjective[]   @relation("ObjectiveSubHierarchy")
+  indicators            StrategicIndicator[]
+  annualPlanItems       AnnualPlanItem[]
+
+  @@unique([planSourceId, code])
+  @@index([planSourceId, parentObjectiveId])
+  @@map("strategic_objectives")
+}
+
+// PS-2: Indicators, baselines, and targets
+model StrategicIndicator {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  objectiveId           String                 @db.Uuid
+  code                  String                 @db.VarChar(50)
+  name                  String                 @db.VarChar(255)
+  description           String?                @db.Text
+  unitOfMeasurement     String                 @db.VarChar(50)
+  baselineValue         Decimal                @db.Decimal(14, 2)
+  baselineYear          Int
+  targetValue           Decimal                @db.Decimal(14, 2)
+  targetYear            Int
+  verificationMeans     String?                @db.Text
+  createdAt             DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime               @updatedAt @db.Timestamptz(6)
+
+  objective             StrategicObjective     @relation(fields: [objectiveId], references: [id], onDelete: Cascade)
+  annualPlanItems       AnnualPlanItem[]
+
+  @@unique([objectiveId, code])
+  @@index([objectiveId])
+  @@map("strategic_indicators")
+}
+
+// =============================================================================
+// 5. ANNUAL PLAN & CASCADING ENGINE (AP-1, AP-2)
+// =============================================================================
+
+// AP-1: Build the Annual Plan from tagged source items
+model AnnualPlan {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  organizationId        String                 @db.Uuid
+  reportingYear         Int
+  title                 String                 @db.VarChar(255)
+  theme                 String?                @db.VarChar(255)
+  status                PlanStatus             @default(DRAFT)
+  totalBudget           Decimal?               @db.Decimal(16, 2)
+  approvedAt            DateTime?              @db.Timestamptz(6)
+  createdAt             DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime               @updatedAt @db.Timestamptz(6)
+
+  organization          Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  items                 AnnualPlanItem[]
+  workplans             Workplan[]
+
+  @@unique([organizationId, reportingYear])
+  @@index([organizationId, status])
+  @@map("annual_plans")
+}
+
+// AP-1: Tagged source items in the Annual Plan
+model AnnualPlanItem {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  annualPlanId          String                 @db.Uuid
+  strategicObjectiveId  String                 @db.Uuid
+  strategicIndicatorId  String?                @db.Uuid
+  itemCode              String                 @db.VarChar(50)
+  annualTargetValue     Decimal                @db.Decimal(14, 2)
+  annualTargetNarrative String?                @db.Text
+  weightage             Decimal?               @db.Decimal(5, 2)
+  priorityLevel         Int                    @default(1)
+  createdAt             DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime               @updatedAt @db.Timestamptz(6)
+
+  annualPlan            AnnualPlan             @relation(fields: [annualPlanId], references: [id], onDelete: Cascade)
+  strategicObjective    StrategicObjective     @relation(fields: [strategicObjectiveId], references: [id], onDelete: Restrict)
+  strategicIndicator    StrategicIndicator?    @relation(fields: [strategicIndicatorId], references: [id], onDelete: SetNull)
+
+  // AP-2: Cascade to responsible departments, units, or cross-functional programs
+  cascades              AnnualPlanItemCascade[]
+  workplanActivities    WorkplanActivity[]
+
+  @@unique([annualPlanId, itemCode])
+  @@index([annualPlanId, strategicObjectiveId])
+  @@map("annual_plan_items")
+}
+
+// AP-2: Cascade assignments to OrgUnits (Departments, Units, or Programs)
+model AnnualPlanItemCascade {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  annualPlanItemId      String                 @db.Uuid
+  orgUnitId             String                 @db.Uuid
+  contributionType      ContributionType       @default(DELIVERING)
+  targetSharePercent    Decimal?               @db.Decimal(5, 2)
+  allocatedBudget       Decimal?               @db.Decimal(14, 2)
+  delegationNotes       String?                @db.Text
+  createdAt             DateTime               @default(now()) @db.Timestamptz(6)
+
+  annualPlanItem        AnnualPlanItem         @relation(fields: [annualPlanItemId], references: [id], onDelete: Cascade)
+  orgUnit               OrgUnit                @relation(fields: [orgUnitId], references: [id], onDelete: Cascade)
+
+  @@unique([annualPlanItemId, orgUnitId])
+  @@index([annualPlanItemId])
+  @@index([orgUnitId])
+  @@map("annual_plan_item_cascades")
+}
+
+// =============================================================================
+// 6. WORKPLANS & MONTH-BY-MONTH OPERATIONAL TIMELINES (WP-1 TO WP-4)
+// =============================================================================
+
+// WP-1 & WP-3: Consolidate unit workplans into comprehensive departmental workplans
+model Workplan {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  annualPlanId          String                 @db.Uuid
+  orgUnitId             String                 @db.Uuid
+  parentWorkplanId      String?                @db.Uuid
+  title                 String                 @db.VarChar(255)
+  code                  String                 @db.VarChar(50)
+  status                PlanStatus             @default(DRAFT)
+  totalBudget           Decimal                @default(0.00) @db.Decimal(14, 2)
+  version               Int                    @default(1)
+  isConsolidated        Boolean                @default(false)
+  approvedAt            DateTime?              @db.Timestamptz(6)
+  createdAt             DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime               @updatedAt @db.Timestamptz(6)
+
+  annualPlan            AnnualPlan             @relation(fields: [annualPlanId], references: [id], onDelete: Cascade)
+  orgUnit               OrgUnit                @relation(fields: [orgUnitId], references: [id], onDelete: Restrict)
+  parentWorkplan        Workplan?              @relation("WorkplanConsolidation", fields: [parentWorkplanId], references: [id], onDelete: SetNull)
+  subWorkplans          Workplan[]             @relation("WorkplanConsolidation")
+  activities            WorkplanActivity[]
+
+  @@unique([annualPlanId, orgUnitId, version])
+  @@index([annualPlanId, orgUnitId])
+  @@index([parentWorkplanId])
+  @@map("workplans")
+}
+
+// WP-1 & WP-2: Workplan activities with Delivering vs Supporting tags & VC-2 flags
+model WorkplanActivity {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  workplanId            String                 @db.Uuid
+  annualPlanItemId      String?                @db.Uuid
+  activityCode          String                 @db.VarChar(50)
+  title                 String                 @db.VarChar(255)
+  description           String                 @db.Text
+  contributionType      ContributionType       @default(DELIVERING)
+  leadAssigneeId        String?                @db.Uuid
+  estimatedBudget       Decimal                @default(0.00) @db.Decimal(14, 2)
+  fundedBudget          Decimal                @default(0.00) @db.Decimal(14, 2)
+  currency              String                 @default("USD") @db.VarChar(10)
+  executionStatus       ExecutionStatus        @default(NOT_STARTED)
+  completionPercentage  Int                    @default(0)
+  isOverdue             Boolean                @default(false)
+  sortOrder             Int                    @default(0)
+  createdAt             DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime               @updatedAt @db.Timestamptz(6)
+
+  workplan              Workplan               @relation(fields: [workplanId], references: [id], onDelete: Cascade)
+  annualPlanItem        AnnualPlanItem?        @relation(fields: [annualPlanItemId], references: [id], onDelete: SetNull)
+  leadAssignee          EmployeeProfile?       @relation("ActivityLeadAssignee", fields: [leadAssigneeId], references: [id], onDelete: SetNull)
+  monthlySchedules      ActivityMonthlySchedule[]
+  evidenceRequirements  ActivityEvidenceRequirement[]
+  contractItems         PerformanceContractItem[]
+  financialMemos        FinancialMemo[]
+  storyBankItems        StoryBankItem[]
+
+  @@unique([workplanId, activityCode])
+  @@index([workplanId, executionStatus])
+  @@index([leadAssigneeId])
+  @@index([annualPlanItemId])
+  @@map("workplan_activities")
+}
+
+// WP-1: Granular Month-by-Month Activity Schedule (Months 1 to 12)
+model ActivityMonthlySchedule {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  workplanActivityId    String                 @db.Uuid
+  monthNumber           Int
+  monthLabel            String                 @db.VarChar(20)
+  isScheduled           Boolean                @default(false)
+  plannedMilestone      String?                @db.Text
+  plannedTargetNumber   Decimal?               @db.Decimal(12, 2)
+  plannedBudget         Decimal?               @db.Decimal(14, 2)
+  executionStatus       ExecutionStatus        @default(NOT_STARTED)
+  actualDeliveryDate    DateTime?              @db.Date
+  actualProgressPercent Int                    @default(0)
+  executionRemarks      String?                @db.Text
+  createdAt             DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime               @updatedAt @db.Timestamptz(6)
+
+  workplanActivity      WorkplanActivity       @relation(fields: [workplanActivityId], references: [id], onDelete: Cascade)
+  evidenceSubmissions   EvidenceSubmission[]
+
+  @@unique([workplanActivityId, monthNumber])
+  @@index([workplanActivityId, monthNumber])
+  @@index([executionStatus])
+  @@map("activity_monthly_schedules")
+}
+
+// WP-4: Explicit evidence requirements and acceptance criteria
+model ActivityEvidenceRequirement {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  workplanActivityId    String                 @db.Uuid
+  name                  String                 @db.VarChar(255)
+  acceptanceCriteria    String                 @db.Text
+  isMandatory           Boolean                @default(true)
+  formatExpectation     String?                @db.VarChar(100)
+  createdAt             DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime               @updatedAt @db.Timestamptz(6)
+
+  workplanActivity      WorkplanActivity       @relation(fields: [workplanActivityId], references: [id], onDelete: Cascade)
+  evidenceSubmissions   EvidenceSubmission[]
+
+  @@index([workplanActivityId])
+  @@map("activity_evidence_requirements")
+}
+
+// WP-4 & Story Bank: Evidence submission
+model EvidenceSubmission {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  evidenceRequirementId String                 @db.Uuid
+  monthlyScheduleId     String?                @db.Uuid
+  submittedByUserId     String                 @db.Uuid
+  fileName              String                 @db.VarChar(255)
+  fileUrl               String                 @db.Text
+  fileSizeBytes         Int?
+  mimeType              String?                @db.VarChar(100)
+  evidenceHash          String                 @db.VarChar(128)
+  submissionNotes       String?                @db.Text
+  verificationStatus    VerificationStatus     @default(PENDING)
+  verifiedByUserId      String?                @db.Uuid
+  verificationSignature String?                @db.Text
+  rejectionReason       String?                @db.Text
+  verifiedAt            DateTime?              @db.Timestamptz(6)
+  createdAt             DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime               @updatedAt @db.Timestamptz(6)
+
+  evidenceRequirement   ActivityEvidenceRequirement @relation(fields: [evidenceRequirementId], references: [id], onDelete: Cascade)
+  monthlySchedule       ActivityMonthlySchedule?    @relation(fields: [monthlyScheduleId], references: [id], onDelete: SetNull)
+  submittedByUser       User                   @relation("SubmittedEvidence", fields: [submittedByUserId], references: [id], onDelete: Restrict)
+  verifiedByUser        User?                  @relation("VerifiedEvidence", fields: [verifiedByUserId], references: [id], onDelete: SetNull)
+  storyBankItems        StoryBankItem[]
+
+  @@index([evidenceRequirementId])
+  @@index([submittedByUserId])
+  @@index([verificationStatus])
+  @@map("evidence_submissions")
+}
+
+// =============================================================================
+// 7. DYNAMIC PERFORMANCE CONTRACTS & WORKPLAN INTERLOCK (IC-1 TO IC-3)
+// =============================================================================
+
+// IC-1 & VC-1: Individual Performance Contracts with supervisor view
+model PerformanceContract {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  employeeProfileId     String                 @db.Uuid
+  supervisorId          String                 @db.Uuid
+  reportingYear         Int
+  contractTitle         String                 @db.VarChar(255)
+  status                ContractStatus         @default(DRAFT)
+  strategicWeightTotal  Decimal                @default(70.00) @db.Decimal(5, 2)
+  dutyWeightTotal       Decimal                @default(30.00) @db.Decimal(5, 2)
+  finalAppraisalScore   Decimal?               @db.Decimal(5, 2)
+  employeeSignedAt      DateTime?              @db.Timestamptz(6)
+  supervisorSignedAt    DateTime?              @db.Timestamptz(6)
+  approvedAt            DateTime?              @db.Timestamptz(6)
+  createdAt             DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime               @updatedAt @db.Timestamptz(6)
+
+  employeeProfile       EmployeeProfile        @relation("EmployeeContracts", fields: [employeeProfileId], references: [id], onDelete: Cascade)
+  supervisor            EmployeeProfile        @relation("SupervisorContracts", fields: [supervisorId], references: [id], onDelete: Restrict)
+  items                 PerformanceContractItem[]
+
+  @@unique([employeeProfileId, reportingYear])
+  @@index([employeeProfileId])
+  @@index([supervisorId])
+  @@index([reportingYear, status])
+  @@map("performance_contracts")
+}
+
+// IC-1, IC-2, IC-3: Dynamic Interlock: Links to WorkplanActivity without date clutter
+model PerformanceContractItem {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  contractId            String                 @db.Uuid
+  itemCategory          ContractItemCategory   @default(STRATEGIC_ACTIVITY)
+  workplanActivityId    String?                @db.Uuid
+  jobDescriptionDutyId  String?                @db.Uuid
+  keyOutputStatement    String                 @db.Text
+  performanceIndicator  String                 @db.Text
+  targetMetric          String                 @db.VarChar(255)
+  weightagePercent      Decimal                @db.Decimal(5, 2)
+  midYearScore          Decimal?               @db.Decimal(5, 2)
+  annualScore           Decimal?               @db.Decimal(5, 2)
+  supervisorComments    String?                @db.Text
+  createdAt             DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime               @updatedAt @db.Timestamptz(6)
+
+  contract              PerformanceContract    @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  workplanActivity      WorkplanActivity?      @relation(fields: [workplanActivityId], references: [id], onDelete: SetNull)
+  jobDescriptionDuty    JobDescriptionDuty?    @relation(fields: [jobDescriptionDutyId], references: [id], onDelete: SetNull)
+
+  @@index([contractId])
+  @@index([workplanActivityId])
+  @@index([itemCategory])
+  @@map("performance_contract_items")
+}
+
+// IC-3: Maintain Job Description duties as distinct non-strategic category
+model JobDescriptionDuty {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  organizationId        String                 @db.Uuid
+  designationTitle      String                 @db.VarChar(255)
+  dutyCode              String                 @db.VarChar(50)
+  dutyStatement         String                 @db.Text
+  coreCompetency        String?                @db.VarChar(255)
+  standardWeight        Decimal?               @db.Decimal(5, 2)
+  isActive              Boolean                @default(true)
+  createdAt             DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime               @updatedAt @db.Timestamptz(6)
+
+  organization          Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  contractItems         PerformanceContractItem[]
+
+  @@unique([organizationId, designationTitle, dutyCode])
+  @@index([organizationId, designationTitle])
+  @@map("job_description_duties")
+}
+
+// =============================================================================
+// 8. APPROVAL WORKFLOW CHARTERS & GOVERNANCE (AW-1, AW-2)
+// =============================================================================
+
+model ApprovalCharter {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  organizationId        String                 @db.Uuid
+  name                  String                 @db.VarChar(255)
+  targetType            WorkflowTargetType
+  description           String?                @db.Text
+  isDefault             Boolean                @default(false)
+  isActive              Boolean                @default(true)
+  createdAt             DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime               @updatedAt @db.Timestamptz(6)
+
+  organization          Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  stages                ApprovalCharterStage[]
+  workflowInstances     ApprovalWorkflowInstance[]
+
+  @@unique([organizationId, targetType, name])
+  @@index([organizationId, targetType])
+  @@map("approval_charters")
+}
+
+model ApprovalCharterStage {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  charterId             String                 @db.Uuid
+  stepOrder             Int
+  stageName             String                 @db.VarChar(100)
+  assignedRole          SystemRole
+  requiresSpecificUser  Boolean                @default(false)
+  slaHours              Int?                   @default(48)
+  createdAt             DateTime               @default(now()) @db.Timestamptz(6)
+
+  charter               ApprovalCharter        @relation(fields: [charterId], references: [id], onDelete: Cascade)
+
+  @@unique([charterId, stepOrder])
+  @@index([charterId, stepOrder])
+  @@map("approval_charter_stages")
+}
+
+model ApprovalWorkflowInstance {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  charterId             String                 @db.Uuid
+  targetType            WorkflowTargetType
+  targetEntityId        String                 @db.Uuid
+  currentStepOrder      Int                    @default(1)
+  status                WorkflowStatus         @default(PENDING)
+  submittedByUserId     String                 @db.Uuid
+  createdAt             DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime               @updatedAt @db.Timestamptz(6)
+
+  charter               ApprovalCharter        @relation(fields: [charterId], references: [id], onDelete: Restrict)
+  decisionLogs          ApprovalDecisionLog[]
+
+  @@index([targetType, targetEntityId])
+  @@index([status])
+  @@map("approval_workflow_instances")
+}
+
+model ApprovalDecisionLog {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  workflowInstanceId    String                 @db.Uuid
+  stepOrder             Int
+  decidedByUserId       String                 @db.Uuid
+  decision              ApprovalDecision
+  remarks               String                 @db.Text
+  snapshotMetadata      Json?                  @db.JsonB
+  decidedAt             DateTime               @default(now()) @db.Timestamptz(6)
+
+  workflowInstance      ApprovalWorkflowInstance @relation(fields: [workflowInstanceId], references: [id], onDelete: Cascade)
+  decidedByUser         User                   @relation(fields: [decidedByUserId], references: [id], onDelete: Restrict)
+
+  @@index([workflowInstanceId])
+  @@index([decidedByUserId])
+  @@map("approval_decision_logs")
+}
+
+// =============================================================================
+// 9. PRE-FINANCIAL CLEARANCE GATEKEEPER & WEBHOOKS (BP-1)
+// =============================================================================
+
+model FinancialMemo {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  memoNumber            String                 @unique @db.VarChar(100)
+  workplanActivityId    String                 @db.Uuid
+  requestedByUserId     String                 @db.Uuid
+  title                 String                 @db.VarChar(255)
+  justification         String                 @db.Text
+  requestedAmount       Decimal                @db.Decimal(14, 2)
+  currency              String                 @default("USD") @db.VarChar(10)
+  accountingSystem      AccountingSystem       @default(IFMIS)
+  externalAccountingRef String?                @db.VarChar(100)
+  status                FinancialMemoStatus    @default(PENDING_CLEARANCE)
+  clearedByUserId       String?                @db.Uuid
+  clearedAt             DateTime?              @db.Timestamptz(6)
+  clearanceRemarks      String?                @db.Text
+  webhookStatus         String?                @db.VarChar(50)
+  webhookPayload        Json?                  @db.JsonB
+  webhookResponseCode   Int?
+  webhookSentAt         DateTime?              @db.Timestamptz(6)
+  createdAt             DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime               @updatedAt @db.Timestamptz(6)
+
+  workplanActivity      WorkplanActivity       @relation(fields: [workplanActivityId], references: [id], onDelete: Restrict)
+  requestedByUser       User                   @relation("RequestedMemos", fields: [requestedByUserId], references: [id], onDelete: Restrict)
+  clearedByUser         User?                  @relation("ClearedMemos", fields: [clearedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([workplanActivityId])
+  @@index([status])
+  @@index([requestedByUserId])
+  @@map("financial_memos")
+}
+
+// =============================================================================
+// 10. STORY BANK & MANDATORY AI SOURCE ATTRIBUTION
+// =============================================================================
+
+model StoryBankItem {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  organizationId        String                 @db.Uuid
+  workplanActivityId    String                 @db.Uuid
+  evidenceSubmissionId  String                 @db.Uuid
+  headline              String                 @db.VarChar(255)
+  narrativeStory        String                 @db.Text
+  strategicQuote        String?                @db.Text
+  sourceFileUrl         String                 @db.Text
+  verificationSignature String                 @db.VarChar(255)
+  attributionMetadata   Json                   @db.JsonB
+  isPublished           Boolean                @default(false)
+  createdAt             DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime               @updatedAt @db.Timestamptz(6)
+
+  organization          Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workplanActivity      WorkplanActivity       @relation(fields: [workplanActivityId], references: [id], onDelete: Cascade)
+  evidenceSubmission    EvidenceSubmission     @relation(fields: [evidenceSubmissionId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([workplanActivityId])
+  @@index([evidenceSubmissionId])
+  @@map("story_bank_items")
+}
+
+model AuditTrailLog {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  organizationId        String                 @db.Uuid
+  userId                String?                @db.Uuid
+  action                String                 @db.VarChar(100)
+  entityType            String                 @db.VarChar(100)
+  entityId              String                 @db.Uuid
+  beforeState           Json?                  @db.JsonB
+  afterState            Json?                  @db.JsonB
+  ipAddress             String?                @db.VarChar(45)
+  userAgent             String?                @db.Text
+  createdAt             DateTime               @default(now()) @db.Timestamptz(6)
+
+  organization          Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user                  User?                  @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+  @@index([entityType, entityId])
+  @@map("audit_trail_logs")
+}
